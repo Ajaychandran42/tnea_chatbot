@@ -28,6 +28,39 @@ TFC_CENTERS = _load_json("tnea_tfc.json")
 TNEA_RULES = _load_json("tnea_rules.json")
 BROCHURE_CHUNKS = _load_json("brochure_chunks.json")
 
+# ---------------------------------------------------------------------------
+# Fast in-memory indexes.  These avoid scanning thousands of records for the
+# most common TNEA lookups and make exact college-code queries deterministic.
+# ---------------------------------------------------------------------------
+COLLEGE_BY_CODE: Dict[str, Dict[str, Any]] = {}
+COLLEGE_BY_NAME: Dict[str, Dict[str, Any]] = {}
+CUTOFFS_BY_COLLEGE_CODE: Dict[str, List[Dict[str, Any]]] = {}
+SEATS_BY_COLLEGE_CODE: Dict[str, List[Dict[str, Any]]] = {}
+
+for _college in COLLEGES:
+    if not isinstance(_college, dict):
+        continue
+    _code = str(_college.get("tnea_code", "")).strip()
+    _name = str(_college.get("college_name", "")).strip()
+    if _code:
+        COLLEGE_BY_CODE[_code] = _college
+    if _name:
+        COLLEGE_BY_NAME[_name.lower()] = _college
+
+for _item in TNEA_DATA:
+    if not isinstance(_item, dict):
+        continue
+    _m = re.search(r"\((\d{1,4})\)\s*$", str(_item.get("college", "")))
+    if _m:
+        CUTOFFS_BY_COLLEGE_CODE.setdefault(_m.group(1), []).append(_item)
+
+for _item in SEAT_MATRIX:
+    if not isinstance(_item, dict):
+        continue
+    _code = str(_item.get("college_code", "")).strip()
+    if _code:
+        SEATS_BY_COLLEGE_CODE.setdefault(_code, []).append(_item)
+
 # Extract 5-year historical datasets
 COMPARE_CUTOFFS: List[Dict[str, Any]] = []
 COMPARE_RANKS: List[Dict[str, Any]] = []
@@ -336,92 +369,221 @@ def match_branch(branch_query: str, branch_code: str, branch_name: str) -> bool:
 
 
 def search_colleges(query: str = "", district: str = "", autonomous: Optional[bool] = None) -> str:
+    """Search colleges. Returns compact profile data; use get_college_details for branch/intake details."""
     q = (query or "").strip().lower()
     dist = (district or "").strip().lower()
-    
     matches = []
-    for col in COLLEGES:
+
+    # Exact numeric code is resolved directly from the index.
+    candidates = [COLLEGE_BY_CODE[q]] if q.isdigit() and q in COLLEGE_BY_CODE else COLLEGES
+    for col in candidates:
         if not isinstance(col, dict):
             continue
         c_name = str(col.get("college_name", ""))
         c_code = str(col.get("tnea_code", ""))
-        c_dist = str(col.get("contact_details", {}).get("district", "")).lower()
-        c_auto = str(col.get("general_info", {}).get("autonomous_status", "")).lower() == "yes"
-
+        c_dist = str((col.get("contact_details") or {}).get("district", "")).lower()
+        c_auto = str((col.get("general_info") or {}).get("autonomous_status", "")).lower() == "yes"
         if q and not match_college(q, c_name, c_code):
             continue
         if dist and dist not in c_dist:
             continue
         if autonomous is not None and c_auto != autonomous:
             continue
-
-        branches_summary = [
-            f"{b.get('branch_code')} - {b.get('branch_name')}" 
-            for b in col.get("branches", [])[:10] if isinstance(b, dict)
-        ]
-        
-        max_oc_cutoff = -1.0
-        for item in TNEA_DATA:
-            col_text = item.get("college", "")
-            if f"({c_code})" in col_text:
-                oc = (item.get("cutoffs") or {}).get("OC")
-                if oc:
-                    try:
-                        val = float(oc)
-                        if val > max_oc_cutoff:
-                            max_oc_cutoff = val
-                    except (ValueError, TypeError):
-                        pass
-
         matches.append({
             "code": col.get("tnea_code"),
             "name": col.get("college_name"),
-            "district": col.get("contact_details", {}).get("district", "N/A"),
+            "district": (col.get("contact_details") or {}).get("district", "N/A"),
             "category": col.get("college_category", "N/A"),
-            "autonomous": "Yes" if c_auto else "No",
-            "oc_cutoff_2025": max_oc_cutoff if max_oc_cutoff > 0 else "N/A",
-            "sample_branches": branches_summary,
-            "hostel_mess_fee_per_annum": col.get("hostel_facilities", {}).get("boys", {}).get("mess_bill_per_annum", "N/A"),
-            "transport_available": col.get("transport_facilities", {}).get("available", "N/A"),
-            "transport_charges_per_annum": (
-                f"Rs. {col.get('transport_facilities', {}).get('min_charges_per_annum', 0)} - "
-                f"Rs. {col.get('transport_facilities', {}).get('max_charges_per_annum', 0)}"
-                if str(col.get("transport_facilities", {}).get("available", "")).lower() == "yes"
-                else "Not applicable"
-            ),
-            "nearest_railway_station": col.get("general_info", {}).get("nearest_railway_station", "N/A")
+            "autonomous": "Yes" if c_auto else "No"
         })
         if len(matches) >= 8:
             break
-            
     return json.dumps(matches if matches else {"message": "No matching colleges found."})
 
+def get_college_details(college_code_or_name: str) -> str:
+    """Return a compact college profile. Deliberately excludes the seat matrix."""
+    target = str(college_code_or_name or "").strip()
+    college = None
+
+    if target.isdigit():
+        college = COLLEGE_BY_CODE.get(target)
+    else:
+        for col in COLLEGES:
+            if isinstance(col, dict) and match_college(target, str(col.get("college_name", "")), str(col.get("tnea_code", ""))):
+                college = col
+                break
+
+    if not college:
+        return json.dumps({"message": f"No college found for '{target}'. Try the TNEA code or college name."})
+
+    gi = college.get("general_info") or {}
+    contact = college.get("contact_details") or {}
+    branches = []
+    for b in college.get("branches", []):
+        if not isinstance(b, dict):
+            continue
+        bcode = str(b.get("branch_code") or "").upper()
+        matrix_rows = [
+            r for r in SEATS_BY_COLLEGE_CODE.get(str(college.get("tnea_code")), [])
+            if str(r.get("branch_code") or "").upper() == bcode
+        ]
+        # Prefer the 2026 TNEA counselling intake when available; otherwise
+        # fall back to the college's approved intake.
+        intake = matrix_rows[0].get("total") if matrix_rows else b.get("approved_intake")
+        branches.append({
+            "branch_code": b.get("branch_code"),
+            "branch_name": b.get("branch_name"),
+            "tnea_2026_intake": intake
+        })
+
+    return json.dumps({
+        "tnea_code": college.get("tnea_code"),
+        "college_name": college.get("college_name"),
+        "district": contact.get("district") or "N/A",
+        "autonomous": gi.get("autonomous_status") or "No",
+        "website": contact.get("website") or "N/A",
+        "branches": branches[:20],
+        "note": "Compact profile only. Category-wise seat allocation is returned only when the user explicitly asks for the seat matrix."
+    })
+
+
+def get_branch_seats(college_code: int, branch_code: str = "") -> str:
+    """Return approved/intake seats for requested branches, not category-wise seat matrix."""
+    try:
+        code = str(int(college_code))
+    except (ValueError, TypeError):
+        return json.dumps({"message": "Please provide a valid numeric TNEA college code."})
+
+    rows = SEATS_BY_COLLEGE_CODE.get(code, [])
+    target = str(branch_code or "").strip().upper()
+    if target:
+        rows = [
+            r for r in rows
+            if match_branch(target, str(r.get("branch_code", "")), str(r.get("branch_name", "")))
+        ]
+
+    # If no branch was specified, provide a compact branch/intake list.
+    result = [{
+        "branch_code": r.get("branch_code"),
+        "branch_name": r.get("branch_name"),
+        "approved_intake": r.get("total")
+    } for r in rows[:20]]
+
+    if not result:
+        return json.dumps({"message": f"No branch seat information found for college code {code}."})
+    return json.dumps({
+        "college_code": int(code),
+        "branches": result,
+        "note": "Approved/intake seats only. Category-wise OC/BC/MBC/SC/SCA/ST allocation is available through the explicit seat-matrix tool."
+    })
+
+
+def compare_colleges(college_codes: str, branch_code: str = "") -> str:
+    """Compare up to four colleges using available cutoff and profile data."""
+    raw_codes = re.split(r"[,;]+", str(college_codes or ""))
+    codes = []
+    for value in raw_codes:
+        value = value.strip()
+        if value.isdigit() and value in COLLEGE_BY_CODE:
+            codes.append(value)
+    codes = list(dict.fromkeys(codes))[:4]
+
+    if len(codes) < 2:
+        return json.dumps({"message": "Provide at least two valid TNEA college codes, separated by commas."})
+
+    target = str(branch_code or "").strip()
+    rows = []
+    for code in codes:
+        col = COLLEGE_BY_CODE[code]
+        profile = {
+            "tnea_code": int(code),
+            "college_name": col.get("college_name"),
+            "district": (col.get("contact_details") or {}).get("district", "N/A"),
+            "autonomous": (col.get("general_info") or {}).get("autonomous_status", "No"),
+        }
+        cutoff_rows = CUTOFFS_BY_COLLEGE_CODE.get(code, [])
+        selected = []
+        for item in cutoff_rows:
+            br = str(item.get("branch", ""))
+            bm = re.search(r"\(([A-Z0-9]+)\)$", br.strip())
+            bc = bm.group(1) if bm else ""
+            if target and not match_branch(target, bc, br):
+                continue
+            oc = (item.get("cutoffs") or {}).get("OC")
+            if oc is not None:
+                try:
+                    selected.append({"branch": br, "oc_cutoff_2025": float(oc)})
+                except (ValueError, TypeError):
+                    pass
+        selected.sort(key=lambda x: x["oc_cutoff_2025"], reverse=True)
+        profile["cutoffs"] = selected[:6]
+        rows.append(profile)
+    return json.dumps({"colleges": rows, "note": "Cutoffs are reference data; they do not guarantee admission."})
+
+
+def fast_college_code_lookup(user_message: str) -> Optional[str]:
+    """Fast path for exact numeric college-code profile/branch questions."""
+    q = (user_message or "").strip().lower()
+    match = re.search(r"\b(?:tnea\s*(?:college\s*)?(?:code|number)?\s*)?(\d{1,4})\b", q)
+    if not match:
+        return None
+    code = match.group(1)
+    if code not in COLLEGE_BY_CODE:
+        return None
+
+    # Only intercept profile/branch questions. Cutoff/seat-matrix questions
+    # should still use the specialized tools and the model for phrasing.
+    profile_terms = ("college", "details", "detail", "branch", "branches", "course", "courses", "intake")
+    explicit_matrix = ("seat matrix", "seat allocation", "category wise", "category-wise")
+    cutoff_terms = ("cutoff", "cut off", "rank", "historical")
+    if not any(t in q for t in profile_terms) or any(t in q for t in explicit_matrix + cutoff_terms):
+        return None
+
+    data = json.loads(get_college_details(code))
+    if "message" in data:
+        return None
+    lines = [
+        f"### {data['college_name']}",
+        f"- **TNEA Code:** {data['tnea_code']}",
+        f"- **District:** {data['district']}",
+        f"- **Autonomous:** {data['autonomous']}",
+    ]
+    if data.get("website") and data["website"] != "N/A":
+        lines.append(f"- **Website:** {data['website']}")
+    lines.append("\n**Branches and 2026 counselling intake:**")
+    for b in data.get("branches", []):
+        lines.append(f"- `{b.get('branch_code')}` — {b.get('branch_name')} — **{b.get('tnea_2026_intake', 'N/A')} seats**")
+    return "\n".join(lines)
 
 def get_college_cutoffs(college_code_or_name: str, branch_code: str = "") -> str:
-    target = str(college_code_or_name).strip()
-    target_branch = str(branch_code).strip()
+    target = str(college_code_or_name or "").strip()
+    target_branch = str(branch_code or "").strip()
+    rows = []
+
+    if target.isdigit():
+        rows = CUTOFFS_BY_COLLEGE_CODE.get(target, [])
+    else:
+        for item in TNEA_DATA:
+            if not isinstance(item, dict):
+                continue
+            if match_college(target, str(item.get("college", ""))):
+                rows.append(item)
 
     results = []
-    for item in TNEA_DATA:
-        if not isinstance(item, dict):
+    for item in rows:
+        branch_text = str(item.get("branch", ""))
+        bm = re.search(r"\(([A-Z0-9]+)\)$", branch_text.strip())
+        b_code = bm.group(1) if bm else ""
+        if target_branch and not match_branch(target_branch, b_code, branch_text):
             continue
-        col_text = item.get("college", "")
-        branch_text = item.get("branch", "")
-        
-        b_code_match = re.search(r'\(([A-Z0-9]+)\)$', branch_text.strip())
-        b_code = b_code_match.group(1) if b_code_match else ""
-
-        if match_college(target, col_text):
-            if target_branch and not match_branch(target_branch, b_code, branch_text):
-                continue
-            results.append({
-                "college": item.get("college"),
-                "branch": item.get("branch"),
-                "cutoffs": item.get("cutoffs", {}),
-                "ranks": item.get("ranks", {})
-            })
-            if len(results) >= 8:
-                break
+        results.append({
+            "college": item.get("college"),
+            "branch": item.get("branch"),
+            "cutoffs": item.get("cutoffs", {}),
+            "ranks": item.get("ranks", {})
+        })
+        if len(results) >= 12:
+            break
 
     if not results and COMPARE_CUTOFFS:
         for item in COMPARE_CUTOFFS:
@@ -429,25 +591,22 @@ def get_college_cutoffs(college_code_or_name: str, branch_code: str = "") -> str
             c_code = str(item.get("college_code", ""))
             b_code = item.get("branch_code", "")
             b_name = item.get("branch_name", "")
-
             if match_college(target, c_name, c_code):
                 if target_branch and not match_branch(target_branch, b_code, b_name):
                     continue
                 values = item.get("values", {})
                 latest_year = max(values.keys()) if values else "2025"
                 latest_cutoffs = values.get(latest_year, {})
-
-                rank_entry = RANK_MAP.get(f"{c_code}_{b_code.upper()}", {})
+                rank_entry = RANK_MAP.get(f"{c_code}_{str(b_code).upper()}", {})
                 rank_values = rank_entry.get("values", {})
                 latest_ranks = rank_values.get(latest_year, {})
-
                 results.append({
                     "college": f"{c_name} ({c_code})",
                     "branch": f"{b_name} ({b_code})",
                     "cutoffs": {k.upper(): v for k, v in latest_cutoffs.items()},
                     "ranks": {k.upper(): v for k, v in latest_ranks.items()}
                 })
-                if len(results) >= 8:
+                if len(results) >= 12:
                     break
 
     return json.dumps(results if results else {"message": f"No cutoff records found for '{college_code_or_name}' and branch '{branch_code}'."})
@@ -575,27 +734,18 @@ def predict_colleges(cutoff: float, community: str = "OC", branch: str = "", dis
     return json.dumps(result)
 
 def get_seat_matrix(college_code, branch_code: str = "") -> str:
-    # ── Guard: coerce to int safely ────────────────────────────────────
     try:
-        college_code = int(college_code)
+        code = str(int(college_code))
     except (ValueError, TypeError):
         return json.dumps({"message": f"Invalid college code '{college_code}'. Please provide a numeric code."})
-    results = []
-    target_branch = branch_code.strip().upper() if branch_code else ""
-
-    for item in SEAT_MATRIX:
-        if not isinstance(item, dict):
-            continue
-        c_code = str(item.get("college_code", ""))
-        if c_code == str(college_code):
-            b_code = str(item.get("branch_code", "")).upper()
-            b_name = str(item.get("branch_name", ""))
-            if target_branch and not match_branch(target_branch, b_code, b_name):
-                continue
-            results.append(item)
-
-    return json.dumps(results if results else {"message": f"No seat matrix entries found for college code {college_code}."})
-
+    rows = SEATS_BY_COLLEGE_CODE.get(code, [])
+    target = str(branch_code or "").strip().upper()
+    if target:
+        rows = [
+            item for item in rows
+            if match_branch(target, str(item.get("branch_code", "")), str(item.get("branch_name", "")))
+        ]
+    return json.dumps(rows if rows else {"message": f"No seat matrix entries found for college code {code}."})
 
 def get_tfc_centers(district_or_city: str) -> str:
     if not district_or_city or not district_or_city.strip():
@@ -878,6 +1028,9 @@ def get_transport_info(college_code_or_name: str) -> str:
 
 AVAILABLE_TOOLS = {
     "search_colleges": search_colleges,
+    "get_college_details": get_college_details,
+    "get_branch_seats": get_branch_seats,
+    "compare_colleges": compare_colleges,
     "get_college_cutoffs": get_college_cutoffs,
     "get_historical_cutoffs": get_historical_cutoffs,
     "predict_colleges": predict_colleges,
@@ -901,6 +1054,50 @@ TOOLS_SCHEMA = [
                     "district": {"type": "string", "description": "District name (e.g., 'Chennai', 'Coimbatore')"},
                     "autonomous": {"type": "boolean", "description": "True for autonomous only"}
                 }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_college_details",
+            "description": "Get a compact profile for one college, including TNEA code, district, autonomous status, website, and branch names with approved intake. Do NOT return category-wise seat matrix unless explicitly requested.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "college_code_or_name": {"type": "string", "description": "Exact TNEA college code or college name"}
+                },
+                "required": ["college_code_or_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_branch_seats",
+            "description": "Get branch-wise approved/intake seats for a college. Use this for normal 'how many seats/branches' questions. This is NOT the category-wise seat matrix.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "college_code": {"type": "integer", "description": "TNEA college code"},
+                    "branch_code": {"type": "string", "description": "Optional branch code or branch name"}
+                },
+                "required": ["college_code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_colleges",
+            "description": "Compare 2 to 4 colleges by code using profile and available cutoff data. Use only when the user explicitly asks to compare colleges.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "college_codes": {"type": "string", "description": "Comma-separated TNEA college codes"},
+                    "branch_code": {"type": "string", "description": "Optional branch to compare"}
+                },
+                "required": ["college_codes"]
             }
         }
     },
@@ -956,7 +1153,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_seat_matrix",
-            "description": "Check the exact TNEA 2026 seat distribution for a specific college.",
+            "description": "Return the exact TNEA 2026 category-wise seat matrix. Use ONLY when the user explicitly asks for the seat matrix, category-wise allocation, OC/BC/MBC/SC/SCA/ST seats, or seat allocation breakdown.",
             "parameters": {
                 "type": "object",
                 "properties": {

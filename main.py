@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Any, Optional
 from llm_engine import stream_chat
 
@@ -33,7 +33,7 @@ MAX_MESSAGE_LENGTH = 2000
 
 class ChatRequest(BaseModel):
     message: str
-    history: List[Dict[str, Any]] = []
+    history: List[Dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("message")
     @classmethod
@@ -53,7 +53,7 @@ class ChatRequest(BaseModel):
                 continue
             role = msg.get("role", "")
             content = msg.get("content", "")
-            if role in ("user", "assistant", "system") and isinstance(content, str) and content.strip():
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
                 clean.append({"role": role, "content": content[:MAX_MESSAGE_LENGTH]})
         # Keep only the most recent messages to stay within context limits
         return clean[-MAX_HISTORY_LENGTH:]
@@ -77,6 +77,8 @@ async def chat_endpoint(req: ChatRequest):
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
             }
         )
     except Exception as e:

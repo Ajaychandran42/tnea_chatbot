@@ -573,7 +573,7 @@ button { font-family: inherit; }
     .welcome-subtitle { font-size:14px; max-width:520px; }
     .message-actions { opacity:.75; visibility:visible; transform:none; }
     .message-content { overflow-wrap:anywhere; }
-    .message-content table { display:block; overflow-x:auto; white-space:nowrap; }
+    .message-content table { display:block; width:100%; max-width:100%; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; }
 }
 @media (max-width:480px) {
     .chat-area { padding:12px 10px 142px; }
@@ -581,7 +581,7 @@ button { font-family: inherit; }
     .header-title { font-size:14px; max-width:42vw; }
     .header-status { font-size:10px; max-width:42vw; }
     .user-message { max-width:94%; }
-    .bot-message { padding:14px; border-radius:14px; }
+    .bot-message { padding:14px; border-radius:14px; width:100%; max-width:100%; }
     .message-content { font-size:14px; line-height:1.65; }
     .message-content th,.message-content td { padding:8px 10px; }
     .action-btn { width:34px; height:34px; }
@@ -591,3 +591,40 @@ button { font-family: inherit; }
 button:focus-visible,textarea:focus-visible,select:focus-visible { outline:3px solid var(--accent-glow); outline-offset:2px; }
 .message-content img { max-width:100%; height:auto; }
 
+
+/* === RESPONSIVE OUTPUT HARDENING === */
+.main-area,
+.chat-area,
+.bot-message,
+.message-content,
+.input-wrapper {
+    min-width: 0;
+}
+.message-content {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.message-content pre {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.message-content a {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.message-content table {
+    max-width: 100%;
+}
+
+@media (max-width:360px) {
+    .header { padding-left:8px; padding-right:8px; }
+    .chat-area { padding-left:8px; padding-right:8px; }
+    .input-area { padding-left:8px; padding-right:8px; }
+    .chat-input { font-size:14px; padding-left:8px; padding-right:6px; }
+    .send-btn { width:38px; height:38px; }
+    .mic-btn { width:38px; height:38px; }
+    .message-content th, .message-content td { padding:7px 8px; }
+}

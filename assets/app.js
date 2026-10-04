@@ -340,14 +340,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // ── Fetch with abort timeout (90 seconds) ─────────────────────
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 120000);
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
 
         try {
             // Log for debugging
             console.log("[chat] Sending request to /chat with:", { message: text, historyCount: chatHistory.length });
             
             const response = await fetch("/chat", {
-                method: "POST", headers: { "Content-Type": "application/json" },
+                method: "POST", headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+                cache: "no-store",
                 body: JSON.stringify({ message: text, history: chatHistory }),
                 signal: controller.signal
             });
