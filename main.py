@@ -14,11 +14,14 @@ from pydantic import BaseModel, field_validator
 from typing import List, Dict, Any, Optional
 from llm_engine import stream_chat
 
-app = FastAPI(title="TNEA AI")
+app = FastAPI(title="TNEA GPT", version="2.0.0")
 
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
-    allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,8 +64,9 @@ async def serve_ui():
 
 @app.get("/health")
 async def health_check():
-    """Simple health check endpoint for the frontend."""
-    return {"status": "ok"}
+    """Production-friendly health check without exposing secrets."""
+    from llm_engine import client as llm_client, MODEL_NAME
+    return {"status":"ok","service":"tnea-gpt","ai_configured":llm_client is not None,"model":MODEL_NAME if llm_client is not None else None}
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):

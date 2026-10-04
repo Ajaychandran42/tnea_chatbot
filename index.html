@@ -47,7 +47,7 @@
             bottom: 0;
             left: 280px;
             right: 0;
-            padding: 16px 18% 20px 18%;
+            padding: 16px 16px 20px 16px;
             background: linear-gradient(to top, var(--bg-main) 85%, transparent);
             z-index: 100;
         }
@@ -56,6 +56,10 @@
                 left: 0;
                 padding: 12px 16px 16px 16px;
             }
+        }
+        .input-wrapper {
+            width: min(100%, 900px);
+            margin: 0 auto;
         }
         .input-dock {
             background: var(--bg-surface);
@@ -84,8 +88,10 @@
 <body>
     <div class="app-shell">
         <!-- Sidebar -->
-        <aside class="sidebar" id="sidebar">
+        <div class="sidebar-overlay" id="sidebarOverlay" aria-hidden="true"></div>
+        <aside class="sidebar" id="sidebar" aria-label="Chat sessions and settings">
             <div class="sidebar-header">
+                <button class="icon-btn sidebar-close-btn" id="closeSidebar" aria-label="Close sidebar" title="Close sidebar"><i class="fa-solid fa-xmark"></i></button>
                 <div class="brand">
                     <div class="brand-icon">
                         <img src="/assets/logo.jpeg" alt="Logo" class="brand-logo">
@@ -134,7 +140,7 @@
             <!-- Header Bar -->
             <header class="header">
                 <div class="header-left">
-                    <button class="icon-btn toggle-sidebar-btn" id="toggleSidebar">
+                    <button class="icon-btn toggle-sidebar-btn" id="toggleSidebar" aria-label="Open sidebar" title="Open sidebar">
                         <i class="fa-solid fa-bars"></i>
                     </button>
                     <div class="header-brand">

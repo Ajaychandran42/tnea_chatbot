@@ -5,6 +5,19 @@ function sanitizeHTML(str) {
     return div.innerHTML;
 }
 
+function sanitizeRenderedMarkdown(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    template.content.querySelectorAll("script,style,iframe,object,embed,form,link,meta").forEach(el => el.remove());
+    template.content.querySelectorAll("*").forEach(el => {
+        [...el.attributes].forEach(attr => {
+            const name=attr.name.toLowerCase(), value=attr.value.trim().toLowerCase();
+            if (name.startsWith("on") || ((name === "href" || name === "src") && value.startsWith("javascript:"))) el.removeAttribute(attr.name);
+        });
+    });
+    return template.innerHTML;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     const chatContainer = document.getElementById("chatContainer");
     const userInput = document.getElementById("userInput");
@@ -116,13 +129,23 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     const toggleSidebarBtn = document.getElementById("toggleSidebar");
+    const closeSidebarBtn = document.getElementById("closeSidebar");
     const sidebar = document.getElementById("sidebar");
-    if (toggleSidebarBtn && sidebar) {
-        toggleSidebarBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            sidebar.style.transform = (sidebar.style.transform === "translateX(0px)") ? "translateX(-100%)" : "translateX(0px)";
-        });
+    const sidebarOverlay = document.getElementById("sidebarOverlay");
+    const mobileQuery = window.matchMedia("(max-width: 868px)");
+    function setSidebar(open) {
+        if (!sidebar) return;
+        sidebar.classList.toggle("is-open", open);
+        document.body.classList.toggle("sidebar-open", open && mobileQuery.matches);
+        sidebarOverlay?.classList.toggle("is-visible", open && mobileQuery.matches);
+        toggleSidebarBtn?.setAttribute("aria-expanded", String(open));
+        sidebarOverlay?.setAttribute("aria-hidden", String(!(open && mobileQuery.matches)));
     }
+    toggleSidebarBtn?.setAttribute("aria-expanded", "false");
+    toggleSidebarBtn?.addEventListener("click", e => { e.stopPropagation(); setSidebar(!sidebar?.classList.contains("is-open")); });
+    closeSidebarBtn?.addEventListener("click", () => setSidebar(false));
+    sidebarOverlay?.addEventListener("click", () => setSidebar(false));
+    mobileQuery.addEventListener("change", () => { if (!mobileQuery.matches) setSidebar(false); });
 
     // --- Theme & Layout Settings ---
     const themeSelect = document.getElementById('themeSelect');
@@ -170,6 +193,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const ws = document.getElementById("welcomeScreen");
             if (ws) ws.style.display = "flex";
             
+            setSidebar(false);
             showToast("Started new session");
         });
     }
@@ -316,7 +340,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // ── Fetch with abort timeout (90 seconds) ─────────────────────
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 90000);
+        const timeoutId = setTimeout(() => controller.abort(), 120000);
 
         try {
             // Log for debugging
@@ -369,7 +393,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         botUI.thoughtWrap.querySelector('i.fa-spin').classList.remove('fa-spin');
                     } else if (data.type === "token") {
                         accText += data.content;
-                        botUI.content.innerHTML = marked.parse(accText);
+                        botUI.content.innerHTML = sanitizeRenderedMarkdown(marked.parse(accText));
                         botUI.msgElement.setAttribute("data-raw-text", accText);
                     } else if (data.type === "error") {
                         console.error("[chat] Server error event:", data.content);

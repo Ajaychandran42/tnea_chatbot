@@ -3,7 +3,8 @@ import os
 import re
 from typing import Optional, List, Dict, Any
 
-DATA_DIR = "data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 def _load_json(filename: str):
     path = os.path.join(DATA_DIR, filename)
@@ -511,7 +512,7 @@ def get_historical_cutoffs(college_code_or_name: str, branch_code: str = "", com
 
 
 def predict_colleges(cutoff: float, community: str = "OC", branch: str = "", district: str = "") -> str:
-    """Predicts colleges based on cutoff, community, branch, and multiple districts."""
+    """Return within-cutoff reference matches and a separate nearby-above-cutoff list."""
     # ── Guard: validate cutoff range ───────────────────────────────────
     try:
         cutoff = float(cutoff)
@@ -527,45 +528,51 @@ def predict_colleges(cutoff: float, community: str = "OC", branch: str = "", dis
     if comm not in ["OC", "BC", "BCM", "MBC", "SC", "SCA", "ST"]:
         comm = "OC"
         
-    matches = []
+    within_cutoff = []
+    nearby_above_cutoff = []
     for item in TNEA_DATA:
         if not isinstance(item, dict):
             continue
-            
         c_college = str(item.get("college", ""))
         c_branch = str(item.get("branch", ""))
-        
         b_code_match = re.search(r'\(([A-Z0-9]+)\)$', c_branch.strip())
         b_code = b_code_match.group(1) if b_code_match else ""
-
         if target_districts and not any(d in c_college.lower() for d in target_districts):
             continue
-            
         if target_branch and not match_branch(target_branch, b_code, c_branch):
             continue
-            
-        cutoffs = item.get("cutoffs", {})
-        c_cutoff = cutoffs.get(comm)
-        
-        if c_cutoff is not None:
-            try:
-                c_cutoff_val = float(c_cutoff)
-                if (cutoff - 15) <= c_cutoff_val <= (cutoff + 2.5):
-                    matches.append({
-                        "college": item.get("college"),
-                        "branch": item.get("branch"),
-                        f"{comm}_cutoff": c_cutoff_val
-                    })
-            except (ValueError, TypeError):
-                pass
-                
-    matches = sorted(matches, key=lambda x: x[f"{comm}_cutoff"], reverse=True)
-    top_matches = matches[:6] 
-    
-    if not top_matches:
-        return json.dumps({"message": f"No colleges found matching cutoff {cutoff} for {comm} community."})
-        
-    return json.dumps(top_matches)
+        c_cutoff = (item.get("cutoffs") or {}).get(comm)
+        if c_cutoff is None:
+            continue
+        try:
+            c_cutoff_val = float(c_cutoff)
+        except (ValueError, TypeError):
+            continue
+        record = {
+            "college": item.get("college"),
+            "branch": item.get("branch"),
+            f"{comm}_cutoff": c_cutoff_val,
+        }
+        if c_cutoff_val <= cutoff:
+            record["cutoff_difference"] = round(cutoff - c_cutoff_val, 2)
+            within_cutoff.append(record)
+        elif c_cutoff_val <= cutoff + 2.5:
+            record["cutoff_difference"] = round(c_cutoff_val - cutoff, 2)
+            nearby_above_cutoff.append(record)
+    within_cutoff.sort(key=lambda x: x[f"{comm}_cutoff"], reverse=True)
+    nearby_above_cutoff.sort(key=lambda x: x["cutoff_difference"])
+    result = {
+        "student_cutoff": cutoff,
+        "community": comm,
+        "branch": target_branch or "Any",
+        "district": district or "Any",
+        "within_cutoff": within_cutoff[:8],
+        "nearby_above_cutoff": nearby_above_cutoff[:4],
+        "note": "Within-cutoff entries are reference matches, not admission guarantees. Nearby-above-cutoff entries are above the student's cutoff and must not be described as likely options."
+    }
+    if not result["within_cutoff"] and not result["nearby_above_cutoff"]:
+        result["message"] = f"No reference cutoff records found near {cutoff} for {comm} community."
+    return json.dumps(result)
 
 def get_seat_matrix(college_code, branch_code: str = "") -> str:
     # ── Guard: coerce to int safely ────────────────────────────────────
@@ -786,27 +793,46 @@ def get_top_colleges(branch: str = "", district: str = "", category: str = "") -
 
 
 def get_tnea_guidelines(query: str) -> str:
+    """Retrieve relevant TNEA counselling guidance using topic-aware scoring."""
     if not query or not query.strip():
-        return json.dumps({"message": "Please provide a topic to search for TNEA guidelines."})
-    q = query.strip().lower()
-    matched = []
-
+        return json.dumps({"message": "Please provide a TNEA counselling topic to search for."})
+    q = re.sub(r"[^a-z0-9%&+\- ]+", " ", query.strip().lower())
+    stop = {"what","when","where","which","how","can","could","would","should","tell","about","please","give","show","need","want","the","for","and","with","from","into","this","that","are","is","my","me","i","to","of","in","on","do","does","a","an"}
+    q_tokens={t for t in q.split() if len(t)>2} - stop
+    aliases={
+      "documents":["registration_documents","certificate_upload_list"],"document":["registration_documents","certificate_upload_list"],
+      "certificates":["registration_documents","certificate_upload_list","eligibility_nativity"],"certificate":["registration_documents","certificate_upload_list","eligibility_nativity"],
+      "application":["registration_documents","certificate_upload_list"],"registration":["registration_documents"],"choice":["counseling_procedure","counseling_confirmation_options"],
+      "choice filling":["counseling_procedure"],"allotment":["counseling_procedure","counseling_confirmation_options"],"accept":["counseling_confirmation_options"],
+      "reporting":["counseling_procedure","counseling_fee_reporting"],"fee":["fee_concessions","counseling_fee_reporting"],"fees":["fee_concessions","counseling_fee_reporting"],
+      "scholarship":["fee_concessions"],"first graduate":["fee_concessions"],"7.5":["reservation_percentages","fee_concessions"],
+      "reservation":["reservation_percentages","reservation_certificates","special_reservation_categories"],"eligibility":["eligibility_nativity","eligibility_marks"],
+      "marks":["eligibility_marks","mode_of_selection"],"rank":["mode_of_selection"],"tie":["mode_of_selection"],"normalization":["mode_of_selection"],
+      "sports":["special_reservation_categories"],"disability":["special_reservation_categories","special_reservation_disability"],"pwd":["special_reservation_categories","special_reservation_disability"],
+      "ex-servicemen":["special_reservation_categories"],"marine":["eligibility_marine_mining"],"mining":["eligibility_marine_mining"],"vocational":["vocational_sandwich_integrated"],"sandwich":["vocational_sandwich_integrated"]
+    }
+    scored=[]
+    for item in BROCHURE_CHUNKS:
+        if not isinstance(item,dict) or not item.get("content"): continue
+        cid=str(item.get("id","")); text=f"{cid.replace('_',' ')} {item.get('section','')} {item.get('content','')}".lower()
+        score=0
+        for phrase,ids in aliases.items():
+            if phrase in q and cid in ids: score += 10
+        if score: scored.append((score,str(item.get("content")).strip()))
     for rule in TNEA_RULES:
-        if not isinstance(rule, dict):
-            continue
-        keywords = rule.get("keywords", [])
-        if any(kw in q for kw in keywords):
-            matched.append(rule.get("content"))
-
-    if not matched:
-        for chunk in BROCHURE_CHUNKS:
-            content = chunk.get("content", "")
-            if any(word in content.lower() for word in q.split() if len(word) > 3):
-                matched.append(content)
-                if len(matched) >= 3:
-                    break
-
-    return json.dumps(matched if matched else {"message": "Please consult official TNEA notification guidelines."})
+        if not isinstance(rule,dict): continue
+        topic=str(rule.get("topic","" )).lower(); kws=[str(k).lower() for k in (rule.get("keywords") or [])]
+        score=0
+        for kw in kws:
+            if kw in q: score += 7 if len(kw.split())>1 else 3
+        if any(tok in topic for tok in q_tokens): score += 2
+        if score: scored.append((score,str(rule.get("content","")).strip()))
+    if not scored:
+        return json.dumps({"message": f"No matching TNEA counselling guidance was found for '{query}'. Please ask about eligibility, registration, documents, reservation, cutoffs, counselling, allotment, fees, scholarships, TFCs, or related topics."})
+    unique={}
+    for score,content in scored:
+        if content and (content not in unique or score>unique[content]): unique[content]=score
+    return json.dumps([content for content,score in sorted(unique.items(), key=lambda x:x[1], reverse=True)[:3]])
 
 def get_transport_info(college_code_or_name: str) -> str:
     """Retrieve transport facility details (college bus availability, charges,
