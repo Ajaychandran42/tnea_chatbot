@@ -26,7 +26,108 @@ document.addEventListener("DOMContentLoaded", () => {
     const toast = document.getElementById("toast");
 
     let chatHistory = [];
+    let currentSessionId = null;
     let isGenerating = false;
+    const SESSION_KEY = "tnea_chat_sessions_v2";
+    const MAX_SAVED_SESSIONS = 20;
+
+    function loadSessions() {
+        try {
+            const raw = localStorage.getItem(SESSION_KEY);
+            const parsed = raw ? JSON.parse(raw) : [];
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (_) {
+            return [];
+        }
+    }
+
+    function saveSessions(sessions) {
+        try {
+            localStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, MAX_SAVED_SESSIONS)));
+        } catch (_) {}
+    }
+
+    function sessionTitle(messages) {
+        const first = messages.find(m => m.role === "user");
+        const text = first?.content || "New counselling chat";
+        return text.length > 34 ? text.slice(0, 34).trimEnd() + "…" : text;
+    }
+
+    function renderSessionList() {
+        const list = document.getElementById("sessionList");
+        if (!list) return;
+        const sessions = loadSessions();
+        list.innerHTML = "";
+        if (!sessions.length) {
+            list.innerHTML = '<div class="session-empty">Your recent chats will appear here.</div>';
+            return;
+        }
+        sessions.sort((a,b) => (b.updatedAt || 0) - (a.updatedAt || 0)).forEach(session => {
+            const row = document.createElement("button");
+            row.type = "button";
+            row.className = "session-item" + (session.id === currentSessionId ? " active" : "");
+            row.title = session.title;
+            row.innerHTML = '<i class="fa-regular fa-message"></i><span></span>';
+            row.querySelector("span").textContent = session.title;
+            row.addEventListener("click", () => restoreSession(session.id));
+            list.appendChild(row);
+        });
+    }
+
+    function persistCurrentSession() {
+        if (!chatHistory.length) return;
+        const sessions = loadSessions();
+        const existing = sessions.find(s => s.id === currentSessionId);
+        const session = existing || {
+            id: currentSessionId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+            createdAt: Date.now()
+        };
+        currentSessionId = session.id;
+        session.title = sessionTitle(chatHistory);
+        session.messages = chatHistory.slice(-MAX_CHAT_HISTORY);
+        session.updatedAt = Date.now();
+        const filtered = sessions.filter(s => s.id !== session.id);
+        saveSessions([session, ...filtered]);
+        renderSessionList();
+    }
+
+    function restoreSession(id) {
+        if (isGenerating) return;
+        const session = loadSessions().find(s => s.id === id);
+        if (!session) return;
+        currentSessionId = session.id;
+        chatHistory = Array.isArray(session.messages) ? session.messages.slice(-MAX_CHAT_HISTORY) : [];
+        Array.from(chatContainer.children).forEach(child => {
+            if (child.id !== "welcomeScreen") child.remove();
+        });
+        const ws = document.getElementById("welcomeScreen");
+        if (ws) ws.style.display = chatHistory.length ? "none" : "flex";
+        for (let i = 0; i < chatHistory.length; i += 2) {
+            if (chatHistory[i]?.role === "user") appendUserMessage(chatHistory[i].content);
+            if (chatHistory[i + 1]?.role === "assistant") appendBotHistoryMessage(chatHistory[i + 1].content, chatHistory[i].content);
+        }
+        renderSessionList();
+        setSidebar(false);
+        requestAnimationFrame(() => { chatContainer.scrollTop = chatContainer.scrollHeight; });
+    }
+
+    function appendBotHistoryMessage(text, prompt = "") {
+        const div = document.createElement("div");
+        div.className = "bot-message completed";
+        div.setAttribute("data-prompt", prompt);
+        div.setAttribute("data-raw-text", text);
+        div.innerHTML = '<div class="message-content"></div>' +
+            '<div class="message-actions">' +
+            '<button class="action-btn tts-btn" title="Listen"><i class="fa-solid fa-play"></i></button>' +
+            '<button class="action-btn copy-btn" title="Copy"><i class="fa-regular fa-copy"></i></button>' +
+            '<button class="action-btn redo-btn" title="Regenerate"><i class="fa-solid fa-rotate-right"></i></button>' +
+            '<button class="action-btn share-btn" title="Share"><i class="fa-solid fa-share-nodes"></i></button>' +
+            '</div>';
+        div.querySelector(".message-content").innerHTML = sanitizeRenderedMarkdown(marked.parse(text));
+        chatContainer.appendChild(div);
+    }
+
+    renderSessionList();
     const synth = window.speechSynthesis;
     let currentUtterance = null;
     let activeTtsBtn = null;
@@ -170,6 +271,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const newChatBtn = document.getElementById('newChatBtn');
     if (menuClearBtn) {
         menuClearBtn.addEventListener('click', () => {
+            const sessions = loadSessions().filter(s => s.id !== currentSessionId);
+            saveSessions(sessions);
+            currentSessionId = null;
             chatHistory = [];
             Array.from(chatContainer.children).forEach(child => {
                 if (child.id !== "welcomeScreen") child.remove();
@@ -181,6 +285,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (newChatBtn) {
         newChatBtn.addEventListener('click', () => {
+            currentSessionId = null;
             chatHistory = [];
             
             // Remove everything except the welcome screen
@@ -245,9 +350,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 } else {
                     safeCopy(rawText).then(ok => showToast(ok ? "Copied for sharing." : "Copy failed."));
                 }
-            }
-            if (target.classList.contains("thumbs-up") || target.classList.contains("thumbs-down")) {
-                target.style.color = "var(--card-user)"; showToast("Feedback recorded.");
             }
             if (target.classList.contains("tts-btn")) {
                 if (!rawText || !rawText.trim()) {
@@ -385,13 +487,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     try { data = JSON.parse(payload); } catch (e) { continue; }
 
                     if (data.type === "thought") {
+                        // Internal progress is intentionally kept out of the
+                        // answer UI; users see a clean, uninterrupted response.
                         accThought += data.content + "\n";
-                        botUI.thoughtBody.textContent = accThought;
-                        botUI.thoughtWrap.style.display = "inline-flex";
                     } else if (data.type === "thought_done") {
-                        botUI.thoughtWrap.querySelector('.thinking-toggle span').textContent = "View Logic";
-                        botUI.thoughtWrap.querySelector('i.fa-spin').classList.replace('fa-circle-notch', 'fa-check');
-                        botUI.thoughtWrap.querySelector('i.fa-spin').classList.remove('fa-spin');
+                        // No visible reasoning container.
                     } else if (data.type === "token") {
                         accText += data.content;
                         botUI.content.innerHTML = sanitizeRenderedMarkdown(marked.parse(accText));
@@ -409,6 +509,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 while (chatHistory.length > MAX_CHAT_HISTORY) {
                     chatHistory.shift(); chatHistory.shift();
                 }
+                persistCurrentSession();
             }
         } catch (err) {
             clearTimeout(timeoutId);
@@ -458,27 +559,24 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function createBotCardShell(prompt) {
-        const div = document.createElement("div"); 
+        const div = document.createElement("div");
         div.className = "bot-message";
-        div.setAttribute("data-prompt", prompt); 
+        div.setAttribute("data-prompt", prompt);
         div.setAttribute("data-raw-text", "");
         div.innerHTML = `
-            <div class="thinking-wrapper" style="display: none;">
-                <button class="thinking-toggle">
-                    <i class="fa-solid fa-circle-notch fa-spin"></i><span>Analyzing</span>
-                </button>
-                <div class="thinking-body"></div>
-            </div>
-            <div class="message-content"></div>
+            <div class="message-content"><span class="stream-cursor" aria-hidden="true"></span></div>
             <div class="message-actions">
                 <button class="action-btn tts-btn" title="Listen"><i class="fa-solid fa-play"></i></button>
                 <button class="action-btn copy-btn" title="Copy"><i class="fa-regular fa-copy"></i></button>
-                <button class="action-btn thumbs-up" title="Helpful"><i class="fa-regular fa-thumbs-up"></i></button>
-                <button class="action-btn thumbs-down" title="Not helpful"><i class="fa-regular fa-thumbs-down"></i></button>
-                <button class="action-btn redo-btn" title="Redo"><i class="fa-solid fa-rotate-right"></i></button>
+                <button class="action-btn redo-btn" title="Regenerate"><i class="fa-solid fa-rotate-right"></i></button>
                 <button class="action-btn share-btn" title="Share"><i class="fa-solid fa-share-nodes"></i></button>
             </div>
         `;
-        return { msgElement: div, thoughtWrap: div.querySelector('.thinking-wrapper'), thoughtBody: div.querySelector('.thinking-body'), content: div.querySelector('.message-content') };
+        return {
+            msgElement: div,
+            thoughtWrap: { style: { display: "none" } },
+            thoughtBody: null,
+            content: div.querySelector(".message-content")
+        };
     }
 });

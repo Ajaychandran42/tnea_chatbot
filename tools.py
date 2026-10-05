@@ -1,6 +1,10 @@
 import json
 import os
 import re
+import html
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
 from typing import Optional, List, Dict, Any
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1026,6 +1030,113 @@ def get_transport_info(college_code_or_name: str) -> str:
     return json.dumps(matches)
 
 
+
+# ---------------------------------------------------------------------------
+# Online TNEA resource search
+# ---------------------------------------------------------------------------
+class _SearchResultParser(HTMLParser):
+    """Small, dependency-free parser for DuckDuckGo HTML result pages."""
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._anchor = None
+        self._text = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "a" and ("result__a" in attrs.get("class", "") or
+                           "result-link" in attrs.get("class", "")):
+            self._anchor = attrs.get("href", "")
+            self._text = []
+
+    def handle_data(self, data):
+        if self._anchor is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._anchor is not None:
+            title = " ".join("".join(self._text).split())
+            href = html.unescape(self._anchor)
+            if title and href:
+                if href.startswith("//"):
+                    href = "https:" + href
+                self.results.append({"title": title, "url": href})
+            self._anchor = None
+            self._text = []
+
+
+def _online_search(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Search the public web without adding a heavyweight dependency.
+
+    Official TNEA domains are searched first when the question is admissions-
+    specific. Results are returned as source metadata; the model decides what
+    is relevant and never treats search snippets as authoritative data.
+    """
+    q = re.sub(r"\s+", " ", str(query or "").strip())
+    if not q:
+        return []
+
+    queries = []
+    tnea_terms = ("tnea", "counselling", "counseling", "engineering admission",
+                  "anna university", "tnea code", "cutoff", "seat matrix")
+    if any(term in q.lower() for term in tnea_terms):
+        queries.append(f"site:tneaonline.org {q}")
+        queries.append(f"site:annauniv.edu {q}")
+    queries.append(q)
+
+    found = []
+    seen = set()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; TNEA-Counsellor/2.1; +https://tneaonline.org/)"
+    }
+
+    for search_q in queries:
+        try:
+            url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(search_q)
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=7) as response:
+                body = response.read().decode("utf-8", errors="ignore")
+            parser = _SearchResultParser()
+            parser.feed(body)
+            for item in parser.results:
+                href = item["url"]
+                # DDG sometimes wraps destinations in a redirect URL.
+                parsed = urllib.parse.urlparse(href)
+                if "uddg" in urllib.parse.parse_qs(parsed.query):
+                    href = urllib.parse.parse_qs(parsed.query)["uddg"][0]
+                if not href.startswith(("http://", "https://")):
+                    continue
+                key = href.rstrip("/").lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({"title": item["title"], "url": href})
+                if len(found) >= max_results:
+                    return found
+        except Exception:
+            continue
+    return found
+
+
+def search_tnea_online(query: str) -> str:
+    """Find current/recent online TNEA resources when local project data is insufficient."""
+    results = _online_search(query, max_results=6)
+    if not results:
+        return json.dumps({
+            "status": "unavailable",
+            "message": "Online search is temporarily unavailable. Use the local TNEA project data where possible."
+        })
+
+    # Keep the payload small: the LLM receives source titles + URLs and can
+    # decide which sources are worth using. It should not fabricate page text.
+    return json.dumps({
+        "status": "ok",
+        "query": query,
+        "sources": results
+    })
+
+
+
 AVAILABLE_TOOLS = {
     "search_colleges": search_colleges,
     "get_college_details": get_college_details,
@@ -1039,6 +1150,7 @@ AVAILABLE_TOOLS = {
     "get_tnea_guidelines": get_tnea_guidelines,
     "get_top_colleges": get_top_colleges,
     "get_transport_info": get_transport_info,
+    "search_tnea_online": search_tnea_online,
 }
 
 TOOLS_SCHEMA = [
@@ -1242,6 +1354,21 @@ TOOLS_SCHEMA = [
                     "college_code_or_name": {"type": "string", "description": "TNEA college code or college name (e.g., '2006', 'CEG', 'PSG Tech', 'College of Engineering Guindy')"}
                 },
                 "required": ["college_code_or_name"]
+            }
+        }
+    },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tnea_online",
+            "description": "Search the public web for current TNEA-related information or official resources when the local project data does not contain enough information. Prefer official TNEA/Anna University sources. Use after checking the relevant local data tool, not instead of it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A focused TNEA web-search query, such as current counselling dates, official notification, application status, or a rule not found in the project data."}
+                },
+                "required": ["query"]
             }
         }
     }
